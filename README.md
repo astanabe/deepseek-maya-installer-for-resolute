@@ -4,7 +4,7 @@ DeepSeek-V4.1-Flash-1017 installer script for Ubuntu 26.04 LTS Resolute Raccoon 
 
 The installer sets up Project Maya v1.1.63 and DeepSeek-V4.1-Flash-1017 as a systemd service behind nginx, for web browsers (PC and smartphone) and coding agents on an intranet. Compiling the engine, downloading the model and writing the engine configuration are left to Maya's own setup (`maya.sh`); this installer adds the CUDA toolkit and the other apt packages, the service user, the systemd unit, the nginx site, ufw rules, the selection of GPUs and network interfaces, and an uninstaller.
 
-> **Status**: this document is the specification. The installer `install-deepseek-maya.sh` is not written yet, and nothing has been run on real hardware. See [Verification](#verification).
+> **Status**: the installer `install-deepseek-maya.sh` is implemented but **has never been run on real hardware**: the development machine has no supported GPU. What was checked there, and what remains to be checked on real hardware, is listed under [Verification](#verification).
 
 ## Prerequisites
 
@@ -117,7 +117,7 @@ API key: see [API key](#api-key).
     build/maya-ds4                          the compiled DeepSeek engine
     maya-ds4.json                           engine configuration written by Maya's setup
     maya-ds4.log                            engine log
-    maya-setup.log                          log of Maya's setup
+    maya-setup.log                          output of the last run of Maya's setup (kept by the installer)
   models/                                   model files, one folder per quantization, with Maya's pack inside
 /etc/deepseek-maya/
   install.conf                              settings of the installation
@@ -158,31 +158,31 @@ The model files downloaded through the installer are not part of this repository
 - The version is pinned: Maya's update check is disabled (`MAYA_UPDATE_CHECK=0`), and the Update button of Maya's page cannot work without a git checkout. Updating Maya means updating this installer and re-running it.
 - Maya's setup and `maya.sh` are always run as the service user, with destdir as its home directory.
 - Maya's setup is run without starting the model (`--no-start`), so the model is loaded only once, by the systemd service.
-- Conversations are kept (`MAYA_DS4_SLOT_KEEP=1`): the DeepSeek engine holds one conversation per parallel request, and without this setting a request that belongs to another conversation makes the engine read the whole prompt again from the first token. With it, a conversation that is replaced is set aside in RAM or under `models/` and taken back when it continues, so a web chat and a coding agent can take turns.
+- Conversations are kept (`MAYA_DS4_SLOT_KEEP=1`): the DeepSeek engine holds one conversation per parallel request, and without this setting a request that belongs to another conversation makes the engine read the whole prompt again from the first token. With it, a conversation that is replaced is set aside in RAM or under `models/` (in the model folder's `maya-ds4/slots`, up to 16 GB) and taken back when it continues, so a web chat and a coding agent can take turns.
 - Maya's model management (downloading, deleting and switching models through the page or the Ollama-style `/api/*` paths) is turned off (`MAYA_MODEL_MANAGEMENT=0`). The model is selected by the installer only.
 - At start, the engine pins most of the free RAM (all but about 6 GB) and warms its caches; a start takes minutes.
 
 ## Quantization
 
-Selected with `--quant`. The installer derives Maya's setup option from the name.
+Selected with `--quant`. The installer derives Maya's setup option from the name (given together with `--model DeepSeek-V4.1-Flash-1017`).
 
 | `--quant` | Provider | Maya's setup option | Download | Memory for the whole model |
 |---|---|---|---:|---:|
-| `Maya-XS` | Project Maya | `--model deepseek-maya-xs` | 278 GB | 121 GB |
-| `Maya-S` (default) | Project Maya | `--model deepseek-maya-s` | 340 GB | 186 GB |
-| `UD-IQ1_S` | Unsloth | `--ds4-quant gguf-iq1_s` | 233 GB | 123 GB |
-| `UD-IQ1_M` | Unsloth | `--ds4-quant gguf-iq1_m` | 250 GB | 140 GB |
-| `UD-IQ2_XXS` | Unsloth | `--ds4-quant gguf-iq2_xxs` | 301 GB | 166 GB |
-| `UD-Q2_K_XL` | Unsloth | `--ds4-quant gguf-q2_k_xl` | 335 GB | 200 GB |
+| `Maya-XS` | Project Maya | `--ds4-quant maya-xs` | 278 GB | 121 GB |
+| `Maya-S` (default) | Project Maya | `--ds4-quant maya-s` | 340 GB | 186 GB |
+| `UD-IQ1_S` | Unsloth | `--ds4-quant gguf-iq1_s` | 284 GB | 123 GB |
+| `UD-IQ1_M` | Unsloth | `--ds4-quant gguf-iq1_m` | 301 GB | 140 GB |
+| `UD-IQ2_XXS` | Unsloth | `--ds4-quant gguf-iq2_xxs` | 327 GB | 166 GB |
+| `UD-Q2_K_XL` | Unsloth | `--ds4-quant gguf-q2_k_xl` | 361 GB | 200 GB |
 | `UD-IQ3_XXS` | Unsloth | `--ds4-quant gguf-iq3_xxs` | 395 GB | 234 GB |
 | `UD-IQ3_S` | Unsloth | `--ds4-quant gguf-iq3_s` | 424 GB | 263 GB |
-| `UD-Q3_K_XL` | Unsloth | `--ds4-quant gguf-q3_k_xl` | 485 GB | 283 GB |
-| `UD-Q4_K_XL` | Unsloth | `--ds4-quant gguf-q4` | 501 GB | not documented by Maya |
-| `UD-Q8_K_XL` | Unsloth | `--ds4-quant gguf-q8` | 508 GB | about 306 GB |
+| `UD-Q3_K_XL` | Unsloth | `--ds4-quant gguf-q3_k_xl` | 444 GB | 283 GB |
+| `UD-Q4_K_XL` | Unsloth | `--ds4-quant gguf-q4` | 459 GB | about 298 GB |
+| `UD-Q8_K_XL` | Unsloth | `--ds4-quant gguf-q8` | 467 GB | about 306 GB |
 
 - The figures are from Maya v1.1.63 (`tools/ds4/download_gguf.json`, `docs/MEMORY.md`).
-- Download: the model files, including the Engram (n-gram) tables, which always stay on the SSD. Maya also fetches the DSpark drafter (about 8 GB; `Maya-XS` has its own of about 4 GB) and, with `--vision`, the vision tower (about 1 GB), and builds its pack (about 1 GB) inside the model folder. The installer checks for the download size plus about 20 GB of free disk space.
-- Memory for the whole model: GPU memory and RAM together that hold every expert, the context aside. With less, Maya keeps as many experts as fit and reads the rest from the SSD, which is much slower. The installer says so when the machine has less, and warns and asks whether to continue when the machine has less than 32 GB of RAM, the minimum Maya names.
+- Download: the model files, including the Engram (n-gram) tables, which always stay on the SSD. Unsloth's files are used with Maya's own Q6_K Engram tables (161 GB) instead of the tables in Unsloth's shards, and the figures include them. Maya also fetches the DSpark drafter (about 8 GB; `Maya-XS` has its own of about 4 GB), **also with `--drafting skip`**, and, with `--vision`, the vision tower (about 1 GB), and builds its pack (about 1 GB) inside the model folder. Kept conversations take up to 16 GB more. The installer checks for the download size plus about 20 GB of free disk space.
+- Memory for the whole model: GPU memory and RAM together that hold every expert, the context aside. With less, Maya keeps as many experts as fit and reads the rest from the SSD, which is much slower. The installer says so when the RAM and the memory of the selected GPU together are less, and warns and asks whether to continue when the machine has less than 32 GB of RAM, the minimum Maya names.
 - `Maya-S` picks the same next token as the original model 92.6% of the time, as measured by the Maya project. `UD-Q8_K_XL` keeps DeepSeek's own formats and is the closest to the original.
 - `UD-Q4_K_XL` is no longer in Maya's own list of choices, but Maya still accepts it.
 - Maya's `Maya-M` is announced but not published in v1.1.63, so it is not offered.
@@ -215,11 +215,12 @@ Maya has a single API key that is either required for everything except the web 
 | Path | Default | Key required with |
 |---|---|---|
 | `/`, `/web/`, `/fonts/`, `/health` | passed on as is (Maya needs no key for them) | — |
-| what the web page needs for chatting: `GET /metrics`, `POST /attach`, `POST /pdf`, `POST /api/tokens`, `GET /v1/strata/stream`, `POST /v1/strata/cancel`, and `GET` of `/settings`, `/mcp`, `/api/context`, `/api/thinking-budget`, `/api/turbo` and `/api/savings` (read-only) | nginx adds the key | `--web-api-key` |
+| what the web page needs for chatting: `GET /metrics`, `POST /attach`, `POST /pdf`, `POST /api/tokens`, `GET /v1/strata/stream`, `POST /v1/strata/cancel`, and `GET` of `/settings`, `/mcp`, `/api/context`, `/api/thinking-budget`, `/api/turbo`, `/api/savings` and `/api/update` (read-only; the page asks `/api/update` when it is loaded) | nginx adds the key | `--web-api-key` |
 | `/v1/chat/completions` (used by the web page and by agents) | nginx adds the key | `--web-api-key` for the web page, `--agent-api-key` for other clients |
 | `/v1/messages`, `/v1/responses` and `/v1/responses/...`, `/v1/models`, `/models`, `/props`, `/tokenize`, `/detokenize` | nginx adds the key | `--agent-api-key` |
 | everything else: management (`POST` of `/settings`, `/api/context`, `/api/port`, `/api/thinking-budget`, `/api/turbo`, `/api/update`, `/api/models/...`, `/api/savings/...`; `/status`, `/v1/status`, `/slots`, `/metrics/prometheus`, `/api/report`, ...) | passed on as is: **the key is always required** | — |
 
+- nginx decides by the normalized path, and where it adds the key Maya is sent exactly that path, so `..` or doubled slashes cannot borrow the key for another path.
 - Where nginx adds the key, it replaces the client's `Authorization` header and removes `x-api-key`, so that the placeholder key that SDKs and agents insist on sending does not cause a 401. With the defaults, coding agents can be configured with any non-empty string as the API key.
 - With `--web-api-key`, enter the key in the settings of the web page. The same is needed to use the management functions of the page (context size, port, thinking budget, Turbo); without the key they fail, while chatting works.
 - `/v1/chat/completions` is shared by the web page and the agents. When `--web-api-key` and `--agent-api-key` differ, nginx decides whether a request comes from the web page by the headers browsers add: `Sec-Fetch-Site: same-origin`, or, where the browser does not send `Sec-Fetch-Site` (browsers send it only to HTTPS and localhost origins, and this site is plain HTTP), an `Origin` header that equals the `Host` header. **Other clients can forge these headers**, so requiring the key on one side only guards against mistakes, not against users who want to get around it. Require it on both sides when that matters.
@@ -243,14 +244,14 @@ The model name is reported by `/v1/models`, together with the context size (`con
 5. Stop the existing `deepseek-maya` service; stop and disable `qwen-strata.service` if it exists (Maya's setup and the engine need the GPU and the RAM)
 6. Download Maya's release archive and extract it into `<destdir>/project-maya` (skipped when the pinned version is already there)
 7. Generate the API key, or reuse the existing one, and write `maya.env` and `nginx-key.conf`
-8. Run Maya's setup once as the service user, without questions and without starting the model (`maya.sh --setup --yes --plain --no-start --download-model` with the model, GPU, context, port, drafting, parallel and vision options, `--models-dir <destdir>/models` and `--env MAYA_DS4_SLOT_KEEP=1`): it creates `.venv`, fetches the llama.cpp source, compiles the engine, downloads and checks the model, builds the pack and writes `maya-ds4.json`. Then set the thinking level in `maya-ds4.json` (`reasoning_effort`), because Maya's setup has no option for it and writes `high` on every run
+8. Run Maya's setup once as the service user, without questions and without starting the model (`maya.sh --setup --yes --plain --no-start --download-model` with the model, GPU, context, port, drafting, parallel and vision options, `--models-dir <destdir>/models` and `--env MAYA_DS4_SLOT_KEEP=1`): it creates `.venv`, fetches the llama.cpp source, compiles the engine, downloads and checks the model, builds the pack and writes `maya-ds4.json`. Maya's setup also ends without an error when it has done nothing, so the installer checks afterwards that the configuration was written in this run and is for the selected quantization, and that the engine and the pack exist. Then set the thinking level in `maya-ds4.json` (`reasoning_effort`), because Maya's setup has no option for it and writes `high` on every run
 9. Write the systemd unit, the nginx site and the logrotate configuration, test the nginx configuration (on failure the site is disabled again so that other sites are not affected), enable and start the service
 10. Configure ufw as answered in step 1 (if ufw became active after step 1, ask here) and save `install.conf`
-11. Test: wait until `/health` of Maya answers 200 with the model loaded, then check through nginx that `/health` works, that a management request is refused without the key and accepted with it, that the key requirement of `/metrics` and `/v1/models` matches the settings, that `/v1/models` reports the selected context size, that `/health` reports the selected thinking level, and that a short chat completion is answered
+11. Test: wait until `/health` of Maya answers 200 with the model loaded, then check through nginx that `/health` works, that a management request is refused without the key and accepted with it, that the key requirement of `/metrics` and `/v1/models` matches the settings, that `/v1/models` reports the selected context size, and that a short chat completion is answered; the thinking level `/health` reports is shown
 
 ## Known limitations
 
-- Not yet implemented, and not yet run on real hardware (see below).
+- Not yet run on real hardware (see below).
 - NVIDIA GPUs of the RTX 20 series or newer only. AMD GPUs, Intel Arc, older NVIDIA GPUs (V100, GTX 10) and WSL are not supported.
 - One GPU only; Maya's multi-GPU operation is not offered.
 - The context size 768K is outside Maya's own choices and untested by the Maya project.
@@ -259,21 +260,40 @@ The model name is reported by `/v1/models`, together with the context size (`con
 - Requiring the API key for only one of the web page and the agents depends on request headers and can be circumvented on purpose.
 - With the default settings anyone on the networks the web server listens on can use the model without a key; only the management functions are protected.
 - Maya's model management and its Ollama-style API are turned off, and Maya cannot update itself.
+- After a change of the quantization, Maya may download its Q6_K Engram tables (161 GB) again instead of reusing the copy on the disk: where it looks for an existing copy depends on the quantizations involved (to be checked on real hardware). Keep that much disk space free before switching, and delete the other quantization's files only afterwards (the installer offers it at the end).
+- Kept conversations use up to 16 GB under `models/` in addition to the figures in the table.
 - Claude Code and other Anthropic-compatible clients that call `/v1/messages/count_tokens` get a 404 for that call.
 - TLS is out of scope.
 
 ## Verification
 
-Nothing has been verified by running it. What is written here about Maya comes from reading the documentation and the source of Maya v1.1.63, and what is written about the apt packages from the package index and the package contents of Ubuntu 26.04.1 (`cuda-toolkit-13` 13.1.1 in `multiverse`; its headers accept GCC up to 15; `nvcc` is installed as `/usr/local/cuda-13.1/bin/nvcc`, where Maya looks for it).
+The installer has not been run as a whole: the development machine has no supported GPU. What is written here about Maya comes from reading the documentation and the source of Maya v1.1.63, and what is written about the apt packages from the package index and the package contents of Ubuntu 26.04.1 (`cuda-toolkit-13` 13.1.1 in `multiverse`; its headers accept GCC up to 15; `nvcc` is installed as `/usr/local/cuda-13.1/bin/nvcc`, where Maya looks for it).
+
+Checked on the development machine (2026-11-15), without root and without a GPU, by sourcing the installer into test scripts:
+
+- `bash -n` and `shellcheck` (0.11): no findings
+- Settings: the order option, environment variable, `install.conf`, default; every invalid value stops the installer (`--gpu all` or two addresses, a context size outside the four choices, `--thinking auto`, `0` and `101`, `--drafting off`, `--parallel 0` and `9`, `Maya-M`, equal ports, a system directory as destdir, an unknown interface); the interactive questions, with a yes/no question asked again on an invalid answer
+- GPU selection with a stand-in for `nvidia-smi`: the default (largest memory, most free memory, lowest PCI address), the conversion of the PCI address to the `nvidia-smi` number, a saved GPU that no longer exists, the driver floor (575 stops, 580 passes) and the compute capability (6.1 stops, 7.5 passes, not reported: warning)
+- Generated files: the systemd unit (`systemd-analyze verify` reports nothing but the missing `maya.sh`), the logrotate file, `install.conf` (written and read back), `maya.env` and `nginx-key.conf` (modes 0640 and 0600; the key is kept on a re-run)
+- Maya's setup, with a stand-in for `maya.sh` and for the release archive: the arguments and the environment it is given, standard input not a terminal, the log, reuse of an extracted tree of the pinned version, replacement of a tree of another version, refusal of an archive of another version; the installer stops when the setup fails, when it exits with 0 without writing the configuration (also when a configuration of an earlier run is there), and when the configuration is for another quantization or the engine or the pack is missing; `reasoning_effort` is written as a word or as a JSON number, and an `api_key` left in the configuration is removed
+- The nginx site, in a private nginx in front of a small server that enforces the key as Maya does (exempt paths, `Authorization` or `x-api-key`, `Origin` equal to `Host` for a `POST`): for each of the four combinations of `--web-api-key` and `--agent-api-key`, 341 requests (no key, a placeholder key in either header, the real key, requests as the web page sends them with `Origin` or `Sec-Fetch-Site`, another origin, `GET` against `POST` on the paths the page only reads, a trailing slash, `..`, `%2e%2e`, `%2f` and doubled slashes in the path) with the expected status, the expected path at the server and the `Host` header with the port; all passed
+- The offer to delete other quantizations: only their own folders, never `dspark/`, `vision/` or `Engram-*`, and not a folder that a symbolic link points into
+
+Not checked at all: everything that needs root or the GPU (apt, the service user, the real Maya setup, systemd, ufw, the final tests, `--uninstall`).
 
 To be done on real hardware (planned machine: Ryzen Threadripper PRO 3995WX, 512 GB DDR4-3200, GeForce RTX 5080 Ti 12 GB):
 
+- `apt-get install --no-install-recommends cuda-toolkit-13` provides `nvcc` (the installer stops after apt if it finds none)
+- The GPU selected by PCI address is the one Maya loads (compare the memory in use per GPU in `nvidia-smi`)
 - The engine builds with `cuda-toolkit-13`, `g++` 15.2 and Python 3.14 (Maya's Python packages install into `.venv`); if the build refuses the compiler, `g++-14` with Maya's `--host-compiler g++-14` is the fallback
 - Maya's setup runs to the end without a terminal and without questions with `--yes --plain --no-start --download-model`
 - The service starts with each context size, in particular 786432 (768K) and 1048576 (1M), and `/v1/models` reports it
 - `MAYA_API_KEY`, `MAYA_MODEL_MANAGEMENT=0` and `MAYA_UPDATE_CHECK=0` from the unit's `EnvironmentFile` are what the server enforces
 - Each `--thinking` value is accepted at start (Maya stops the start for a value it does not take), and a number such as `42` works
 - A complete installation, a re-run, a re-run with another quantization, and `--uninstall`
+- Whether Maya downloads its Q6_K Engram tables again after a change of the quantization (between the two Maya quantizations, between two of Unsloth's, and across), and that the folders the installer offers to delete are the right ones
+- The body of `/health` (`"status": "ok"`, `"unloaded": false`, `max_context`, `model`, `defaults.reasoning_effort`) and of `/v1/models` (`context_length`) as the installer reads them, and `GET /status` as the management request of the final test
+- `logrotate -d /etc/logrotate.d/deepseek-maya`
 - Through nginx: a reply in the web chat (PC and smartphone) without an "API key needed" message when `--web-api-key` is off, replies from `/v1/chat/completions` and `/v1/messages`, 401 for a management request without the key and 200 with it; the list of paths the web page needs (see [API key](#api-key)) is complete
 - A web chat and a coding agent taking turns reuse their kept conversations
 - `systemctl stop` and `restart` timings, and switching between `deepseek-maya` and `qwen-strata`
