@@ -55,7 +55,7 @@ destdir (default `/opt/deepseek-maya`) is the home directory of the service user
 - **Conversations kept**: `MAYA_DS4_SLOT_KEEP=1` (through the setup's `--env`). `MAYA_DS4_KEEP_THINKING` is not set.
 - **API key**: Maya always has a key (generated once, kept on re-run, in `/etc/deepseek-maya/maya.env`), and nginx adds it per path and method as in the README table. **Management requests never get the key added and there is no option to change that**; any path not listed is passed with the client's own headers, so unknown paths fail safe. The key is never written into the site file (`include /etc/deepseek-maya/nginx-key.conf`, root 0600) and never passed on a command line. Model management is off (`MAYA_MODEL_MANAGEMENT=0`).
 - **nginx details that matter**: `proxy_set_header Host $http_host` (Maya compares `Origin` with `Host` including the port); where the key is added, the client's `Authorization` is replaced and `x-api-key` removed; several paths get the key for `GET` only; if `nginx -t` fails, the site link is removed before aborting so that other sites are not affected.
-- **Coexistence**: with qwen-strata on one host but never running together: stop and disable `qwen-strata.service` before starting, `Conflicts=qwen-strata.service` in the unit, and `--uninstall` only prints how to enable it again. With plamo-3-translate: the unit is ordered `After=` its two services, because Maya pins nearly all RAM that is free at its start.
+- **Coexistence**: with qwen-strata on one host but never running together: `Conflicts=qwen-strata.service` in the unit, `disable_qwen_strata` stops and disables it before Maya's setup when it is running, starting, waiting for a restart or enabled (`qwen_strata_in_use`; the summary announces it), and `--uninstall` only prints how to enable it again. The qwen-strata installer does the same to `deepseek-maya.service`, so the one installed last runs; keep the two sides symmetric. While `qwen-strata` runs, `gpu_ranked` counts its GPU memory as in use, so a first non-interactive installation may pick the other GPU (the one plamo uses). With plamo-3-translate: the unit is ordered `After=plamo-3-translate-llama.service plamo-3-translate-uwsgi.service`, because Maya pins nearly all RAM that is free at its start. Since plamo commit `0d8bc4e` its llama unit stays "activating" until the model is loaded (`ExecStartPost=` polling `/health`), so the `After=` really waits for the load; a consequence is that any start of `deepseek-maya` (also `systemctl restart` in `start_services`, which announces it) blocks while the plamo llama unit is activating, without a time limit. The plamo uWSGI unit no longer waits for the llama unit; it stays in our `After=` because it is cheap and takes its RAM first too. plamo's side must not name our unit. Other installers' units are only named in `[Unit]` and stopped/disabled; never edit or remove their files.
 - **Uninstall** removes the unit, the nginx site, the logrotate file, `/etc/deepseek-maya`, the installer's ufw rules and destdir (only if the marker `.deepseek-maya-installation` is present); apt packages, nginx and the service user stay.
 - TLS and exposure to the internet are out of scope.
 
@@ -73,7 +73,7 @@ destdir (default `/opt/deepseek-maya`) is the home directory of the service user
 
 1. Resolve values, stop early if no usable GPU (`require_gpu`), prompts, `validate`, GPU / interface / ufw prompts, summary
 2. `preflight`: ports (allowed to be held only by our own unit, or by nginx for a web port that was ours), destdir, home directory of an existing user, AVX2, driver (below 580 stops) and compute capability (below 7.5 stops; not reported: warning), disk, memory
-3. apt (missing packages only; stops if no `nvcc` is found afterwards) → 4. service user, destdir (marker, `models/`, `chown -R`) → 5. stop the unit, stop and disable `qwen-strata.service` → 6. `install_maya` (extract beside the tree, then move) → 7. API key files
+3. apt (missing packages only; stops if no `nvcc` is found afterwards) → 4. service user, destdir (marker, `models/`, `chown -R`) → 5. stop the unit, stop and disable `qwen-strata.service` (if in use) → 6. `install_maya` (extract beside the tree, then move) → 7. API key files
 8. `setup_maya` (one run of `maya.sh --setup ...` as the service user, its output kept in `project-maya/maya-setup.log` by `tee` running as that user), then `set_thinking`
 9. Unit, logrotate, nginx site (`nginx -t`), enable and start → 10. ufw, `install.conf` (saved before the tests on purpose) → 11. `/health` wait (up to 60 minutes), tests through nginx, offer to delete other quantizations
 
@@ -103,7 +103,7 @@ Planned machine: Ryzen Threadripper PRO 3995WX, 512 GB DDR4-3200, GeForce RTX 50
 2. `systemctl status deepseek-maya`, `journalctl -u deepseek-maya`, `<destdir>/project-maya/maya-ds4.log`, `curl http://127.0.0.1:58080/health`.
 3. From another host: the web chat (PC and phone), a coding agent through `/v1/chat/completions` and `/v1/messages` with a placeholder key.
 4. Re-run with the same settings (the API key must stay the same), with 256K, 768K and 1M, with `--thinking 42` and `none`, with the four key combinations, with `--drafting measure`, with another `--quant`, then `--uninstall` and a fresh install.
-5. With qwen-strata and plamo-3-translate installed: the switch between `deepseek-maya` and `qwen-strata`, and plamo on the other GPU.
+5. With qwen-strata and plamo-3-translate installed: the switch between `deepseek-maya` and `qwen-strata`, plamo on the other GPU, and after a reboot `deepseek-maya` starts only when `plamo-3-translate-llama.service` has become active, i.e. has loaded its model (`systemd-analyze critical-chain deepseek-maya.service`, journal timestamps).
 
 ### Assumptions to confirm on the first run
 
@@ -121,3 +121,4 @@ If one of them is wrong, the installer most likely stops in `install_packages`, 
 - GPU numbering: the PCI address selected is the GPU Maya loads.
 - Whether a change of the quantization downloads the Q6_K Engram tables (161 GB) again, and whether `cleanup_old_models` may delete the old folder without breaking the new one.
 - The logrotate rule works (`logrotate -d /etc/logrotate.d/deepseek-maya`).
+- Whether llama-server of plamo has really taken all its RAM and GPU memory when its `/health` returns 200 (the moment our unit may start).
