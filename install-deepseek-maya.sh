@@ -38,8 +38,12 @@ readonly DSMAYAINS_MODEL="DeepSeek-V4.1-Flash-1017"
 # CUDA 13 cannot compile for a compute capability below 7.5 (RTX 20 series).
 readonly DSMAYAINS_NVIDIA_MIN_DRIVER="580"
 readonly DSMAYAINS_MIN_COMPUTE_CAP="7.5"
-# The unit of qwen-strata-installer-for-resolute: never runs together with this service.
-readonly DSMAYAINS_QWEN_UNIT="qwen-strata.service"
+# Maya's speed calibration (--drafting measure) does nothing when the GPU has more than
+# this much memory (MiB) in use.
+readonly DSMAYAINS_GPU_BUSY_MIB=1024
+# The units of glm-maya-installer-for-resolute and qwen-strata-installer-for-resolute:
+# never run together with this service.
+readonly DSMAYAINS_EXCLUSIVE_UNITS="glm-maya.service qwen-strata.service"
 # The units of plamo-3-translate-installer-for-resolute: this service is started after them.
 readonly DSMAYAINS_PLAMO_UNITS="plamo-3-translate-llama.service plamo-3-translate-uwsgi.service"
 
@@ -130,9 +134,10 @@ Options asked interactively when not given (environment variable in brackets):
                            [DSMAYA_THINKING] (default ${DSMAYAINS_DEFAULT[THINKING]})
   --drafting skip|measure|on
                            DeepSeek's DSpark drafter: skip = not used, nothing is
-                           measured; measure = Maya measures it (5 to 30 minutes)
-                           and keeps it only if it is faster; on = used without
-                           measuring [DSMAYA_DRAFTING] (default ${DSMAYAINS_DEFAULT[DRAFTING]})
+                           measured; measure = Maya measures it (10 to 30 minutes;
+                           the GPU must be free) and keeps it only if it is
+                           faster; on = used without measuring
+                           [DSMAYA_DRAFTING] (default ${DSMAYAINS_DEFAULT[DRAFTING]})
   --web-port PORT          web server (nginx) port [DSMAYA_WEB_PORT] (default ${DSMAYAINS_DEFAULT[WEB_PORT]})
   --interfaces all|IF[,IF...]
                            network interfaces on which the web server accepts
@@ -633,7 +638,7 @@ prompt_values() {
   ask QUANT "Quantization" "Quantizations of DeepSeek-V4.1-Flash-1017 (larger is closer to the original and needs more memory):"$'\n'"${DSMAYAINS_list%$'\n'}"
   ask CTX_SIZE "Maximum context in tokens" "Context sizes: 262144 (256K), 524288 (512K), 786432 (768K; not tested by the Maya project), 1048576 (1M)"
   ask THINKING "Thinking level (none, low, medium, high, xhigh, max, or 1-100)"
-  ask DRAFTING "Drafting (skip: no drafter; measure: Maya measures it, 5 to 30 minutes; on: use the drafter)"
+  ask DRAFTING "Drafting (skip: no drafter; measure: Maya measures it, 10 to 30 minutes; on: use the drafter)"
   ask WEB_PORT "Web server port"
   ask_bool WEB_API_KEY "Require the API key for the web chat page?"
   ask_bool AGENT_API_KEY "Require the API key for the API used by coding agents?"
@@ -687,7 +692,7 @@ thinking_label() {
 }
 
 show_summary() {
-  local DSMAYAINS_ctx=${DSMAYAINS_VAL[CTX_SIZE]} DSMAYAINS_note="" DSMAYAINS_vision="yes"
+  local DSMAYAINS_ctx=${DSMAYAINS_VAL[CTX_SIZE]} DSMAYAINS_note="" DSMAYAINS_vision="yes" DSMAYAINS_others
   [[ $DSMAYAINS_ctx != 786432 ]] || DSMAYAINS_note="; not tested by the Maya project"
   [[ ${DSMAYAINS_VAL[VISION]} == yes ]] || DSMAYAINS_vision="no (text only)"
   cat <<EOF
@@ -711,8 +716,9 @@ Installation settings:
   API key, agents      : $(key_label "${DSMAYAINS_VAL[AGENT_API_KEY]}")
   API key, management  : required (always)
 EOF
-  if qwen_strata_in_use; then
-    echo "  Other services       : $DSMAYAINS_QWEN_UNIT will be stopped and disabled"
+  DSMAYAINS_others=$(exclusive_units_in_use | paste -sd, -)
+  if [[ -n $DSMAYAINS_others ]]; then
+    echo "  Other services       : ${DSMAYAINS_others//,/, } will be stopped and disabled"
   fi
   echo
   if [[ $DSMAYAINS_INTERACTIVE == yes && $DSMAYAINS_ASSUME_YES != yes ]]; then
@@ -892,23 +898,49 @@ stop_service() {
   systemctl stop "$DSMAYAINS_UNIT" || die "cannot stop $DSMAYAINS_UNIT"
 }
 
-# Is the qwen-strata service (qwen-strata-installer-for-resolute) running, starting,
-# waiting for its automatic restart, or enabled at boot?
-qwen_strata_in_use() {
-  service_exists "$DSMAYAINS_QWEN_UNIT" || return 1
-  if systemctl is-enabled --quiet "$DSMAYAINS_QWEN_UNIT" 2>/dev/null; then return 0; fi
-  case $(systemctl show -p ActiveState --value "$DSMAYAINS_QWEN_UNIT" 2>/dev/null || true) in
+# unit_in_use UNIT: is a unit of another installer running, starting, waiting for its
+# automatic restart, or enabled at boot?
+unit_in_use() {
+  service_exists "$1" || return 1
+  if systemctl is-enabled --quiet "$1" 2>/dev/null; then return 0; fi
+  case $(systemctl show -p ActiveState --value "$1" 2>/dev/null || true) in
     ""|inactive|failed) return 1 ;;
   esac
   return 0
 }
 
-# qwen-strata is not meant to run at the same time: both need the GPU and most of the RAM.
-# It is stopped and disabled before Maya's setup; --uninstall prints how to enable it again.
-disable_qwen_strata() {
-  qwen_strata_in_use || return 0
-  info "Stopping and disabling $DSMAYAINS_QWEN_UNIT (it does not run together with $DSMAYAINS_UNIT)"
-  systemctl disable --now "$DSMAYAINS_QWEN_UNIT" || die "cannot stop $DSMAYAINS_QWEN_UNIT"
+# Print the units of the other installers that are in use, one per line.
+exclusive_units_in_use() {
+  local DSMAYAINS_x
+  for DSMAYAINS_x in $DSMAYAINS_EXCLUSIVE_UNITS; do
+    if unit_in_use "$DSMAYAINS_x"; then echo "$DSMAYAINS_x"; fi
+  done
+}
+
+# glm-maya and qwen-strata are not meant to run at the same time as this service: each
+# needs a GPU and most of the RAM.  They are stopped and disabled before Maya's setup
+# (not a unit start, so Conflicts= does not act there); --uninstall prints how to enable
+# them again.  Their files are never touched.
+disable_exclusive_units() {
+  local DSMAYAINS_x
+  for DSMAYAINS_x in $DSMAYAINS_EXCLUSIVE_UNITS; do
+    unit_in_use "$DSMAYAINS_x" || continue
+    info "Stopping and disabling $DSMAYAINS_x (it does not run together with $DSMAYAINS_UNIT)"
+    systemctl disable --now "$DSMAYAINS_x" || die "cannot stop $DSMAYAINS_x"
+  done
+}
+
+# Maya's speed calibration (--drafting measure) needs the GPU to itself: with more than
+# 1 GiB of its memory in use (a desktop session is enough) Maya warns, measures nothing and
+# its setup still ends with 0.  Asked before the setup, after the services were stopped;
+# setup_maya checks afterwards that the drafter was measured.
+gpu_busy_check() {
+  local DSMAYAINS_used
+  [[ ${DSMAYAINS_VAL[DRAFTING]} == measure ]] || return 0
+  DSMAYAINS_used=$(gpu_selected "$(gpu_candidates)" | cut -f4)
+  [[ $DSMAYAINS_used =~ ^[0-9]+$ ]] || return 0
+  ((DSMAYAINS_used > DSMAYAINS_GPU_BUSY_MIB)) || return 0
+  warn_continue "GPU ${DSMAYAINS_VAL[GPU]} has $DSMAYAINS_used MiB of its memory in use (a desktop session or another program?). Maya skips its speed calibration (--drafting measure) when more than $DSMAYAINS_GPU_BUSY_MIB MiB is in use; the installer then stops after Maya's setup, because the drafter was not measured. Free the GPU, or re-run with --drafting skip or --drafting on."
 }
 
 wait_port_free() {  # wait_port_free PORT SECONDS
@@ -922,7 +954,7 @@ wait_port_free() {  # wait_port_free PORT SECONDS
 # Download the archive of the pinned tag and extract it into <destdir>/project-maya.  A
 # tree of the pinned version is reused (with its .venv, build and configuration).
 install_maya() {
-  local DSMAYAINS_d=${DSMAYAINS_VAL[DESTDIR]} DSMAYAINS_u=${DSMAYAINS_VAL[USER]} DSMAYAINS_tree DSMAYAINS_new DSMAYAINS_old DSMAYAINS_tar DSMAYAINS_have=""
+  local DSMAYAINS_d=${DSMAYAINS_VAL[DESTDIR]} DSMAYAINS_u=${DSMAYAINS_VAL[USER]} DSMAYAINS_tree DSMAYAINS_new DSMAYAINS_old DSMAYAINS_tar DSMAYAINS_have="" DSMAYAINS_f
   DSMAYAINS_tree=$(maya_tree)
   [[ ! -f $DSMAYAINS_tree/VERSION ]] || DSMAYAINS_have=$(tr -d '[:space:]' < "$DSMAYAINS_tree/VERSION")
   if [[ $DSMAYAINS_have == "$DSMAYAINS_MAYA_VERSION" && -f $DSMAYAINS_tree/maya.sh && -f $DSMAYAINS_tree/maya.py ]]; then
@@ -949,11 +981,14 @@ install_maya() {
   [[ -x $DSMAYAINS_new/maya.sh ]] || run_as "$DSMAYAINS_u" "$DSMAYAINS_d" chmod 0755 "$DSMAYAINS_new/maya.sh"
   if [[ -e $DSMAYAINS_tree ]]; then
     # Another version, or an incomplete tree: replaced.  Its configuration is carried over
-    # so that Maya's setup keeps what it keeps from "the config before".
+    # so that Maya's setup keeps what it keeps from "the config before", and so are the
+    # settings a holder of the API key saved for all users in the web page.
     warn "replacing $DSMAYAINS_tree (version ${DSMAYAINS_have:-unknown}) with Project Maya $DSMAYAINS_MAYA_VERSION; the engine is compiled again"
     mv "$DSMAYAINS_tree" "$DSMAYAINS_old"
-    [[ ! -f $DSMAYAINS_old/maya-ds4.json || -L $DSMAYAINS_old/maya-ds4.json ]] \
-      || run_as "$DSMAYAINS_u" "$DSMAYAINS_d" cp -p "$DSMAYAINS_old/maya-ds4.json" "$DSMAYAINS_new/maya-ds4.json"
+    for DSMAYAINS_f in maya-ds4.json maya-ds4.shared-settings.json; do
+      [[ ! -f $DSMAYAINS_old/$DSMAYAINS_f || -L $DSMAYAINS_old/$DSMAYAINS_f ]] \
+        || run_as "$DSMAYAINS_u" "$DSMAYAINS_d" cp -p "$DSMAYAINS_old/$DSMAYAINS_f" "$DSMAYAINS_new/$DSMAYAINS_f"
+    done
   fi
   mv "$DSMAYAINS_new" "$DSMAYAINS_tree"
   rm -rf --one-file-system "${DSMAYAINS_old:?}"
@@ -993,10 +1028,16 @@ write_key_files() {
 #   --drafting        without it the speed calibration runs (--yes measures)
 #   --download-model  without it nothing is downloaded and the setup still exits with 0
 # The exit code is therefore not trusted: the files the service needs are checked afterwards.
+# The same holds for --drafting measure: the speed calibration is skipped when the GPU is in
+# use, and a failure of it does not stop the setup either.  Maya writes the "installer" part
+# of the configuration anew on every run, so installer.speed_calibration.kept ("dspark" or
+# "none") is there only when the drafter was measured in this run; .failed has the reason
+# when the measurement broke off.  Without a measurement a new configuration runs without
+# the drafter, and one written over an earlier one keeps that one's --dspark.
 # The API key is not passed: the service reads MAYA_API_KEY from maya.env.
 # shellcheck disable=SC2016
 setup_maya() {
-  local DSMAYAINS_d=${DSMAYAINS_VAL[DESTDIR]} DSMAYAINS_u=${DSMAYAINS_VAL[USER]} DSMAYAINS_tree DSMAYAINS_cfg DSMAYAINS_log DSMAYAINS_pack DSMAYAINS_gpu DSMAYAINS_drafting DSMAYAINS_args DSMAYAINS_got DSMAYAINS_start DSMAYAINS_rc=0
+  local DSMAYAINS_d=${DSMAYAINS_VAL[DESTDIR]} DSMAYAINS_u=${DSMAYAINS_VAL[USER]} DSMAYAINS_tree DSMAYAINS_cfg DSMAYAINS_log DSMAYAINS_pack DSMAYAINS_gpu DSMAYAINS_drafting DSMAYAINS_args DSMAYAINS_got DSMAYAINS_start DSMAYAINS_rc=0 DSMAYAINS_kept DSMAYAINS_failed
   DSMAYAINS_tree=$(maya_tree)
   DSMAYAINS_cfg="$DSMAYAINS_tree/maya-ds4.json"
   DSMAYAINS_log="$DSMAYAINS_tree/maya-setup.log"
@@ -1026,6 +1067,17 @@ setup_maya() {
     || die "$DSMAYAINS_cfg is for the quantization '${DSMAYAINS_got:-unknown}', not '$(quant_field 1)': Maya's setup did not finish (see $DSMAYAINS_log)"
   [[ -x $DSMAYAINS_tree/build/maya-ds4 ]] || die "Maya's setup did not build $DSMAYAINS_tree/build/maya-ds4 (see $DSMAYAINS_log)"
   [[ -f $DSMAYAINS_pack/ds4.txt ]] || die "Maya's setup did not build the pack $DSMAYAINS_pack (see $DSMAYAINS_log)"
+  if [[ ${DSMAYAINS_VAL[DRAFTING]} == measure ]]; then
+    DSMAYAINS_kept=$(json_get "$DSMAYAINS_cfg" installer speed_calibration kept)
+    DSMAYAINS_failed=$(json_get "$DSMAYAINS_cfg" installer speed_calibration failed)
+    [[ -n $DSMAYAINS_kept ]] \
+      || die "Maya's setup did not measure the drafter${DSMAYAINS_failed:+ ($DSMAYAINS_failed)}; see $DSMAYAINS_log. Maya skips the measurement when the GPU has more than $DSMAYAINS_GPU_BUSY_MIB MiB of its memory in use. Free the GPU and re-run the installer, or re-run it with --drafting skip or --drafting on (the downloads are kept)"
+    if [[ $DSMAYAINS_kept == none ]]; then
+      info "Speed calibration: the drafter is not faster on this machine; Maya runs without it"
+    else
+      info "Speed calibration: the drafter is faster on this machine; Maya uses it"
+    fi
+  fi
 }
 
 # Maya's setup has no option for the thinking level and writes "reasoning_effort": "high"
@@ -1066,8 +1118,9 @@ write_unit() {
   # (up to about 150 s; the engine saves its conversations and frees the GPU).
   # After= the plamo-3-translate services: Maya pins nearly all RAM that is free at its
   # start, so they come first.  The llama unit of plamo-3-translate stays "activating" until
-  # its model is loaded, and a start of this unit waits for that.  Conflicts= qwen-strata:
-  # starting one stops the other.  Both are ignored when those units are not installed.
+  # its model is loaded, and a start of this unit waits for that.  Conflicts= glm-maya and
+  # qwen-strata: starting one stops the other.  Both are ignored when those units are not
+  # installed.
   # Sandboxing is light on purpose until tested on real hardware.
   cat > "$DSMAYAINS_UNIT_DIR/$DSMAYAINS_UNIT" <<EOF
 # Generated by install-deepseek-maya.sh; changes are overwritten on re-run.
@@ -1075,7 +1128,7 @@ write_unit() {
 Description=DeepSeek-V4.1-Flash-1017 on Project Maya (maya.sh)
 After=network-online.target $DSMAYAINS_PLAMO_UNITS
 Wants=network-online.target
-Conflicts=$DSMAYAINS_QWEN_UNIT
+Conflicts=$DSMAYAINS_EXCLUSIVE_UNITS
 
 [Service]
 Type=simple
@@ -1475,6 +1528,34 @@ expect_code() {
   info "Test passed: $DSMAYAINS_what (HTTP $DSMAYAINS_got)"
 }
 
+# The thinking level a request gets when it names none is the configuration's (shown by
+# /health), unless a holder of the API key saved one for all users in the settings of the
+# web page: Maya keeps that beside the configuration (maya-ds4.shared-settings.json), lets it
+# take the place of the configuration's, and reports it in GET /settings ("defaults"), not
+# in /health.  It was saved on purpose and the file holds other settings too, so it is left
+# alone and only reported.  Maya stores a word (none, auto, low, ... max), never a number;
+# for DeepSeek medium is the same level as high, and xhigh the same as max.
+thinking_word() {
+  case ${1,,} in
+    medium) echo high ;;
+    xhigh) echo max ;;
+    *) echo "${1,,}" ;;
+  esac
+}
+
+check_thinking() {  # check_thinking BASE-URL AUTH-HEADER
+  local DSMAYAINS_out DSMAYAINS_shared
+  DSMAYAINS_out=$(curl -s --fail --max-time 20 -H "$2" "$1/settings" 2>/dev/null || true)
+  if [[ -z $DSMAYAINS_out ]]; then
+    warn "cannot read $1/settings: not checked whether a thinking level saved in the settings of the web page takes the place of --thinking ${DSMAYAINS_VAL[THINKING]}"
+    return 0
+  fi
+  DSMAYAINS_shared=$(json_get - defaults reasoning_effort <<<"$DSMAYAINS_out")
+  if [[ -n $DSMAYAINS_shared && $(thinking_word "$DSMAYAINS_shared") != "$(thinking_word "${DSMAYAINS_VAL[THINKING]}")" ]]; then
+    warn "the thinking level '$DSMAYAINS_shared' was saved in the settings of the web page and takes the place of --thinking ${DSMAYAINS_VAL[THINKING]} for requests that name none; clear it in the page's settings (with the API key), or delete $(maya_tree)/maya-ds4.shared-settings.json and restart $DSMAYAINS_UNIT"
+  fi
+}
+
 smoke_test() {
   local DSMAYAINS_base="http://127.0.0.1:${DSMAYAINS_VAL[WEB_PORT]}" DSMAYAINS_auth DSMAYAINS_want DSMAYAINS_out DSMAYAINS_code DSMAYAINS_ctx
   wait_health
@@ -1500,6 +1581,7 @@ smoke_test() {
   DSMAYAINS_code=${DSMAYAINS_out##*$'\n'}; DSMAYAINS_out=${DSMAYAINS_out%$'\n'*}
   [[ $DSMAYAINS_code == 200 ]] || die "chat completion test failed (HTTP $DSMAYAINS_code): ${DSMAYAINS_out:0:500}"
   info "Test passed: chat completion (HTTP 200)"
+  check_thinking "$DSMAYAINS_base" "$DSMAYAINS_auth"
 }
 
 # Offer to delete the model files of other quantizations: only their own folders under
@@ -1571,7 +1653,8 @@ do_install() {
   ensure_user
   prepare_destdir
   stop_service
-  disable_qwen_strata
+  disable_exclusive_units
+  gpu_busy_check
   install_maya
   write_key_files
   setup_maya
@@ -1592,7 +1675,7 @@ do_install() {
 # -------------------------------------------------------------- uninstall
 
 do_uninstall() {
-  local DSMAYAINS_destdir DSMAYAINS_user DSMAYAINS_p DSMAYAINS_rules
+  local DSMAYAINS_destdir DSMAYAINS_user DSMAYAINS_p DSMAYAINS_rules DSMAYAINS_x DSMAYAINS_n=0
   load_saved_config
   DSMAYAINS_destdir=${DSMAYAINS_ARG[DESTDIR]:-${DSMAYA_DESTDIR:-${DSMAYAINS_SAVED[DESTDIR]:-${DSMAYAINS_DEFAULT[DESTDIR]}}}}
   DSMAYAINS_destdir=${DSMAYAINS_destdir%/}
@@ -1653,12 +1736,16 @@ The apt packages (cuda-toolkit-13, nginx-full, ...) and the service user $DSMAYA
 Remove them manually if they are no longer needed, e.g.:
   sudo userdel $DSMAYAINS_user
 EOF
-  if service_exists "$DSMAYAINS_QWEN_UNIT" && ! systemctl is-enabled --quiet "$DSMAYAINS_QWEN_UNIT" 2>/dev/null; then
+  for DSMAYAINS_x in $DSMAYAINS_EXCLUSIVE_UNITS; do
+    service_exists "$DSMAYAINS_x" || continue
+    if systemctl is-enabled --quiet "$DSMAYAINS_x" 2>/dev/null; then continue; fi
+    DSMAYAINS_n=$((DSMAYAINS_n + 1))
     cat <<EOF
-$DSMAYAINS_QWEN_UNIT is installed but not enabled (installing $DSMAYAINS_APP_NAME stops and disables it).  To use it again:
-  sudo systemctl enable --now ${DSMAYAINS_QWEN_UNIT%.service}
+$DSMAYAINS_x is installed but not enabled (installing $DSMAYAINS_APP_NAME stops and disables it).  To use it again:
+  sudo systemctl enable --now ${DSMAYAINS_x%.service}
 EOF
-  fi
+  done
+  ((DSMAYAINS_n < 2)) || echo "Enable only one of them: they do not run at the same time."
 }
 
 main() {
